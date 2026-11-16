@@ -1,0 +1,189 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+    <style>
+        html, body {
+            height: 100%;
+            margin: 0;
+            background: #17222a;
+            font: 13px Segoe UI,Arial,sans-serif;
+            color: #dce6ed
+        }
+
+        #map {
+            height: calc(100% - 125px)
+        }
+
+        .leaflet-container {
+            background: #17222a
+        }
+
+        .marker {
+            background: #50ff78;
+            border: 2px solid #102020;
+            border-radius: 50%;
+            width: 13px;
+            height: 13px;
+            box-shadow: 0 1px 5px #0008
+        }
+
+        #profile {
+            height: 125px;
+            background: #19242f;
+            box-sizing: border-box;
+            padding: 8px 14px;
+            display: flex;
+            flex-direction: column;
+            gap: 4px
+        }
+
+        #profileTitle {
+            font-weight: 600;
+            color: #a6b8c6
+        }
+
+        #elevation {
+            width: 100%;
+            height: 90px;
+            display: block
+        }
+    </style>
+</head>
+<body>
+    <div id="map"></div><div id="profile" class="empty"><div id="profileTitle">ELEVATION PROFILE</div><canvas id="elevation"></canvas></div>
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script>
+        const map = L.map('map').setView([51.2, -2.9], 11);
+        // Map tiles are configured by WPF. Avoid requesting the volunteer OSM server by default.
+        const providerSpecs = {
+            cartoLight: { url: 'https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', options: { subdomains: 'abcd', maxZoom: 19, attribution: '&copy; OpenStreetMap contributors &copy; CARTO' } },
+            cartoDark: { url: 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', options: { subdomains: 'abcd', maxZoom: 19, attribution: '&copy; OpenStreetMap contributors &copy; CARTO' } },
+            maptilerStreets: { url: 'https://api.maptiler.com/maps/streets-v2/{z}/{x}/{y}.png?key={key}', options: { maxZoom: 19, attribution: '&copy; OpenStreetMap contributors &copy; MapTiler' } },
+            maptilerOutdoor: { url: 'https://api.maptiler.com/maps/outdoor-v2/{z}/{x}/{y}.png?key={key}', options: { maxZoom: 19, attribution: '&copy; OpenStreetMap contributors &copy; MapTiler' } },
+            osm: { url: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png', options: { maxZoom: 19, attribution: '&copy; OpenStreetMap contributors' } }
+        };
+        let currentTiles = null;
+        window.setMapProvider = function (provider, key) {
+            const spec = providerSpecs[provider] || providerSpecs.cartoLight;
+            if (provider.startsWith('maptiler') && !key) { return { ok: false, error: 'MapTiler API key required' }; }
+            const url = spec.url.replace('{key}', encodeURIComponent(key || ''));
+            const next = L.tileLayer(url, { ...spec.options, crossOrigin: false });
+            next.on('tileerror', () => { window.chrome?.webview?.postMessage({ type: 'tileError', provider }); });
+            next.addTo(map); next.bringToBack();
+            if (currentTiles) map.removeLayer(currentTiles);
+            currentTiles = next;
+            return { ok: true };
+        };
+        window.setMapProvider('cartoLight', '');
+        let route = null, selectedRoute = null, handles = [], coords = [], elevations = [], heartRates = [], powers = [], distances = [], selection = [-1, -1], hoverMarker = null, dragStart = null;
+        const canvas = document.getElementById('elevation');
+        let showHeartRate = false, showPower = false;
+        const hasValues = a => a.some(v => typeof v === 'number' && Number.isFinite(v));
+        const rightMargin = () => (showHeartRate && hasValues(heartRates) ? 62 : 0) + (showPower && hasValues(powers) ? 62 : 0) + 8;
+        window.setPowerVisible = function (visible) { showPower = !!visible; drawElevation(); };
+        function updateSelectedRoute() {
+            if (selectedRoute) { map.removeLayer(selectedRoute); selectedRoute = null; }
+            const [start, end] = selection;
+            if (!route || start < 0 || end <= start || end >= coords.length) return;
+            selectedRoute = L.polyline(coords.slice(start, end + 1), {
+                color: '#ff9d35', weight: 7, opacity: 1, interactive: false, lineCap: 'round', lineJoin: 'round'
+            }).addTo(map);
+            selectedRoute.bringToFront();
+            handles.forEach(m => m.setZIndexOffset(1000));
+        }
+        window.setHeartRateVisible = function (visible) { showHeartRate = !!visible; drawElevation(); };
+        function pointAtEvent(e) {
+            const rect = canvas.getBoundingClientRect(), x = Math.max(0, Math.min(rect.width, e.clientX - rect.left));
+            if (!distances.length) return 0;
+            const total = distances[distances.length - 1] || 1, target = Math.max(0, Math.min(1, (x - 48) / Math.max(1, rect.width - 48 - rightMargin()))) * total;
+            let lo = 0, hi = distances.length - 1;
+            while (lo < hi) { const mid = (lo + hi) >> 1; if (distances[mid] < target) lo = mid + 1; else hi = mid; }
+            return lo;
+        }
+        canvas.addEventListener('pointerdown', e => { if (!coords.length) return; dragStart = pointAtEvent(e); canvas.setPointerCapture(e.pointerId); });
+        canvas.addEventListener('pointermove', e => {
+            if (!coords.length) return;
+            const idx = pointAtEvent(e);
+            if (hoverMarker) map.removeLayer(hoverMarker);
+            hoverMarker = L.circleMarker(coords[idx], { radius: 7, color: '#fff', weight: 2, fillColor: '#50ff78', fillOpacity: 1, interactive: false }).addTo(map);
+            if (dragStart !== null) { selection = [Math.min(dragStart, idx), Math.max(dragStart, idx)]; drawElevation(); updateSelectedRoute(); }
+        });
+        canvas.addEventListener('pointerup', e => {
+            if (dragStart === null) return;
+            const idx = pointAtEvent(e); selection = [Math.min(dragStart, idx), Math.max(dragStart, idx)]; dragStart = null; drawElevation();
+            if (selection[1] > selection[0]) window.chrome?.webview?.postMessage({ type: 'selection', start: selection[0], end: selection[1] });
+        });
+        canvas.addEventListener('pointerleave', () => { if (hoverMarker) { map.removeLayer(hoverMarker); hoverMarker = null; } });
+        window.fitRoute = function () { if (route && route.getLatLngs().length > 1) map.fitBounds(route.getBounds(), { padding: [35, 35] }); };
+        window.renderRoute = function (data) {
+            coords = data.points.map(p => [p[0], p[1]]); elevations = data.elevations || []; heartRates = data.heartRates || []; powers = data.powers || []; distances = data.cumulative || []; selection = [data.sectionStart ?? -1, data.sectionEnd ?? -1];
+            if (selectedRoute) { map.removeLayer(selectedRoute); selectedRoute = null; }
+            if (route) map.removeLayer(route); handles.forEach(m => map.removeLayer(m)); handles = [];
+            route = L.polyline(coords, { color: '#30bfff', weight: 4, opacity: .95 }).addTo(map);
+            const icon = L.divIcon({ className: '', html: '<div class="marker"></div>', iconSize: [17, 17], iconAnchor: [8, 8] });
+            data.markers.forEach((idx, i) => {
+                const m = L.marker(coords[idx], { draggable: true, icon, title: 'GPS point ' + (idx + 1) }).addTo(map);
+                m.bindTooltip(i === 0 ? 'Start' : i === data.markers.length - 1 ? 'Finish' : 'Point ' + (idx + 1));
+                m.on('drag', () => {
+                    const ll = m.getLatLng();
+                    // Preview the moved control point; .NET applies the full smooth edit on drop.
+                    const preview = coords.map(p => p.slice()); preview[idx] = [ll.lat, ll.lng]; route.setLatLngs(preview);
+                });
+                m.on('dragend', () => { const ll = m.getLatLng(); window.chrome?.webview?.postMessage({ type: 'move', index: idx, lat: ll.lat, lng: ll.lng }) });
+                handles.push(m);
+            });
+            drawElevation(); updateSelectedRoute(); if (data.fit) window.fitRoute();
+        };
+        function drawElevation() {
+            const profile = document.getElementById('profile');
+            const valid = elevations.filter(v => typeof v === 'number' && Number.isFinite(v));
+            const validHr = heartRates.filter(v => typeof v === 'number' && Number.isFinite(v));
+            const validPower = powers.filter(v => typeof v === 'number' && Number.isFinite(v));
+            profile.classList.toggle('empty', valid.length < 2 && (!showHeartRate || validHr.length < 2) && (!showPower || validPower.length < 2));
+            const ratio = window.devicePixelRatio || 1, rect = canvas.getBoundingClientRect();
+            canvas.width = Math.max(1, Math.floor(rect.width * ratio)); canvas.height = Math.max(1, Math.floor(rect.height * ratio));
+            const ctx = canvas.getContext('2d'); ctx.scale(ratio, ratio);
+            const w = rect.width, h = rect.height, left = 48, right = rightMargin(), top = 16, bottom = 14;
+            const plotWidth = Math.max(1, w - left - right), plotHeight = Math.max(1, h - top - bottom);
+            const total = distances.length ? distances[distances.length - 1] : 0;
+            function xFor(i) { return left + (total > 0 && Number.isFinite(distances[i]) ? distances[i] / total : i / Math.max(1, coords.length - 1)) * plotWidth; }
+            function drawTrace(values, minimum, maximum, color) {
+                const range = Math.max(1, maximum - minimum); ctx.beginPath(); let started = false;
+                values.forEach((v, i) => {
+                    if (typeof v !== 'number' || !Number.isFinite(v)) { started = false; return; }
+                    const x = xFor(i), y = top + plotHeight - (v - minimum) / range * plotHeight;
+                    if (!started) { ctx.moveTo(x, y); started = true; } else ctx.lineTo(x, y);
+                }); ctx.strokeStyle = color; ctx.lineWidth = 2; ctx.stroke();
+            }
+            if (selection[0] >= 0 && selection[1] > selection[0] && selection[1] < coords.length) {
+                ctx.fillStyle = 'rgba(80,255,120,.14)'; ctx.fillRect(xFor(selection[0]), top, xFor(selection[1]) - xFor(selection[0]), plotHeight);
+            }
+            ctx.font = '11px Segoe UI';
+            if (valid.length) {
+                const min = Math.min(...valid), max = Math.max(...valid);
+                drawTrace(elevations, min, max, '#50ff78'); ctx.fillStyle = '#50ff78';
+                ctx.fillText(Math.round(max) + ' m', 4, top + 7); ctx.fillText(Math.round(min) + ' m', 4, h - bottom);
+            }
+            if (showHeartRate && validHr.length) {
+                const min = Math.min(...validHr), max = Math.max(...validHr);
+                drawTrace(heartRates, min, max, '#ff70b7'); ctx.fillStyle = '#ff70b7';
+                const axisX = w - right + 3;
+                ctx.fillText(Math.round(max) + ' bpm', axisX, top + 7);
+                ctx.fillText(Math.round(min) + ' bpm', axisX, h - bottom);
+            }
+            if (showPower && validPower.length) {
+                const min = Math.min(...validPower), max = Math.max(...validPower);
+                drawTrace(powers, min, max, '#ffcc44'); ctx.fillStyle = '#ffcc44';
+                const axisX = w - right + 3 + (showHeartRate && validHr.length ? 62 : 0);
+                ctx.fillText(Math.round(max) + ' W', axisX, top + 7);
+                ctx.fillText(Math.round(min) + ' W', axisX, h - bottom);
+            }
+            ctx.fillStyle = '#a6b8c6'; ctx.fillText('Drag to select · Hover to locate', Math.max(left, w - 235), 11);
+        }
+        window.addEventListener('resize', drawElevation);
+    </script>
+</body>
+</html>
