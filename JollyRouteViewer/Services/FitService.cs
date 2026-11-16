@@ -110,16 +110,57 @@ public static class FitService
                 activity.Type = sport switch { 1 => "Running", 2 => "Cycling", 5 => "Swimming", 11 => "Walking", _ => "Other" };
 
             if (def.Global == 18 && values.TryGetValue(5, out double sessionSport))
-                activity.Type = sessionSport switch { 1 => "Running", 2 => "Cycling", 11 => "Walking", _ => activity.Type };
+            {
+                int sportCode = (int)sessionSport;
+                int subSportCode = values.TryGetValue(6, out double sub) ? (int)sub : 0;
+                activity.Type = (sportCode, subSportCode) switch
+                {
+                    (2, 6) => "Indoor Cycling",
+                    (2, 58) => "Virtual Cycling",
+                    (1, 1) => "Treadmill Running",
+                    (1, 58) => "Virtual Running",
+                    (15, 14) => "Indoor Rowing",
+                    (15, _) => "Rowing",
+                    (1, _) => "Running",
+                    (2, _) => "Cycling",
+                    (11, _) => "Walking",
+                    _ => activity.Type
+                };
+            }
 
-            if (def.Global != 20 || !values.TryGetValue(0, out double lat) || !values.TryGetValue(1, out double lon))
+            if (def.Global == 18 && values.TryGetValue(44, out double poolLength))
+                activity.PoolLengthMetres = poolLength / 100;
+
+            if (def.Global == 18 && values.TryGetValue(5, out double swimSport) && (int)swimSport == 5)
+                activity.Type = values.TryGetValue(6, out double swimSub) && (int)swimSub == 17
+                    ? "Open Water Swimming" : "Pool Swimming";
+
+            if (def.Global == 101)
+            {
+                var length = new SwimLength
+                {
+                    StartTime = values.TryGetValue(2, out double st) ? DateTimeOffset.FromUnixTimeSeconds((long)st + 631065600L) : null,
+                    EndTime = values.TryGetValue(253, out double et) ? DateTimeOffset.FromUnixTimeSeconds((long)et + 631065600L) : null,
+                    ElapsedSeconds = values.TryGetValue(3, out double el) ? el / 1000 : 0,
+                    TimerSeconds = values.TryGetValue(4, out double tm) ? tm / 1000 : 0,
+                    Strokes = values.TryGetValue(5, out double strokes) ? (int)strokes : null,
+                    StrokeType = values.TryGetValue(7, out double stroke) ? (int)stroke : null,
+                    IsRest = values.TryGetValue(12, out double kind) && (int)kind == 0
+                };
+                activity.SwimLengths.Add(length);
+            }
+
+            if (def.Global != 20)
                 continue;
 
             var p = new RoutePoint
             {
-                Latitude = lat * 180 / 2147483648d,
-                Longitude = lon * 180 / 2147483648d
+                Latitude = values.TryGetValue(0, out double lat) ? lat * 180 / 2147483648d : null,
+                Longitude = values.TryGetValue(1, out double lon) ? lon * 180 / 2147483648d : null
             };
+
+            if (values.TryGetValue(5, out double recordedDistance))
+                p.Distance = recordedDistance / 100;
 
             if (values.TryGetValue(2, out double alt))
                 p.Elevation = alt / 5 - 500;
@@ -145,15 +186,29 @@ public static class FitService
             if (values.TryGetValue(253, out double t))
                 p.Time = DateTimeOffset.FromUnixTimeSeconds((long)t + 631065600L);
 
-            if (Math.Abs(p.Latitude) <= 90 && Math.Abs(p.Longitude) <= 180)
+            if ((!p.Latitude.HasValue && !p.Longitude.HasValue) || (p.Latitude is double plat && p.Longitude is double plon && Math.Abs(plat) <= 90 && Math.Abs(plon) <= 180))
                 activity.Points.Add(p);
         }
 
+        // Pool FIT files can contain length messages but no regular record messages.
+        // Construct a timeline from the lengths without inventing GPS positions.
+        if (activity.Points.Count == 0 && activity.SwimLengths.Count > 0)
+        {
+            double metres = 0;
+            foreach (var length in activity.SwimLengths)
+            {
+                if (!length.IsRest && activity.PoolLengthMetres is double pool)
+                    metres += pool;
+                activity.Points.Add(new RoutePoint { Time = length.EndTime, Distance = metres });
+            }
+            if (activity.SwimLengths[0].StartTime is DateTimeOffset start)
+                activity.Points.Insert(0, new RoutePoint { Time = start, Distance = 0 });
+        }
         return activity;
-        void Require(int n) 
-        { 
-            if (n < 0 || pos + n > end) 
-                throw new InvalidDataException("Truncated FIT message"); 
+        void Require(int n)
+        {
+            if (n < 0 || pos + n > end)
+                throw new InvalidDataException("Truncated FIT message");
         }
     }
 
@@ -166,32 +221,32 @@ public static class FitService
             return false;
 
         ulong u = len switch { 1 => data[0], 2 => big ? BinaryPrimitives.ReadUInt16BigEndian(data) : BinaryPrimitives.ReadUInt16LittleEndian(data), 4 => big ? BinaryPrimitives.ReadUInt32BigEndian(data) : BinaryPrimitives.ReadUInt32LittleEndian(data), 8 => big ? BinaryPrimitives.ReadUInt64BigEndian(data) : BinaryPrimitives.ReadUInt64LittleEndian(data), _ => 0 };
-        ulong invalid = t switch 
-        { 
-            0 => 0xFF, 
+        ulong invalid = t switch
+        {
+            0 => 0xFF,
             1 => 0x7F,
-            2 or 10 or 13 => 0xFF, 
-            3 => 0x7FFF, 
+            2 or 10 or 13 => 0xFF,
+            3 => 0x7FFF,
             4 or 11 => 0xFFFF,
             5 => 0x7FFFFFFF,
-            6 or 12 => 0xFFFFFFFF, 
-            9 => 0x7FFFFFFFFFFFFFFF, 
-            14 or 15 or 16 => ulong.MaxValue, 
-            _ => ulong.MaxValue 
+            6 or 12 => 0xFFFFFFFF,
+            9 => 0x7FFFFFFFFFFFFFFF,
+            14 or 15 or 16 => ulong.MaxValue,
+            _ => ulong.MaxValue
         };
 
         if (u == invalid)
             return false;
 
         value = t switch
-        { 
-            1 => (sbyte)u, 
-            3 => (short)u, 
-            5 => (int)u, 
-            9 => (long)u, 
-            8 => BitConverter.Int32BitsToSingle((int)u), 
-            15 => BitConverter.Int64BitsToDouble((long)u), 
-            _ => u 
+        {
+            1 => (sbyte)u,
+            3 => (short)u,
+            5 => (int)u,
+            9 => (long)u,
+            8 => BitConverter.Int32BitsToSingle((int)u),
+            15 => BitConverter.Int64BitsToDouble((long)u),
+            _ => u
         };
 
         return double.IsFinite(value);

@@ -6,6 +6,18 @@ namespace JollyRouteViewer.ViewModels;
 
 public sealed class MainViewModel : INotifyPropertyChanged
 {
+    public string[] ActivityTypes { get; } =
+    [
+        "Cycling",
+        "Running",
+        "Walking",
+        "Hiking",
+        "Swimming",
+        "Pool Swimming",
+        "Open Water Swimming",
+        "Other"
+    ];
+
     private RouteActivity? _activity;
     private bool _allPoints;
     private double _spacingKm = 1;
@@ -39,8 +51,22 @@ public sealed class MainViewModel : INotifyPropertyChanged
             Notify(nameof(MarkerCount));
         }
     }
+    public string SwimSummary
+    {
+        get
+        {
+            var a = Activity;
+            if (a is null || !a.IsSwimming) return "Not a swimming activity";
+            int active = a.SwimLengths.Count(x => !x.IsRest);
+            int strokes = a.SwimLengths.Where(x => !x.IsRest).Sum(x => x.Strokes ?? 0);
+            string lengths = a.SwimLengths.Count > 0 ? $"{active} active lengths; {strokes} strokes" : "No pool length records";
+            double seconds = a.SwimLengths.Where(x => !x.IsRest).Sum(x => x.TimerSeconds);
+            string pace = a.PoolLengthMetres is double pool && pool > 0 && active > 0 && seconds > 0
+                ? $"; pace {TimeSpan.FromSeconds(seconds * 100 / (pool * active)):m\\:ss} /100m" : "";
+            return $"Pool: {a.PoolLengthMetres?.ToString("0.##") ?? "—"} m; {lengths}{pace}";
+        }
+    }
     public string Name => Activity?.Name ?? "No activity loaded";
-    public string Type => Activity?.Type ?? "—";
     public string Distance => Activity?.Points.Count > 1 ? $"{RouteMath.Cumulative(Activity.Points)[^1] / 1000:F2} km" : "—";
     public string Elapsed => FormatDuration(GetElapsed());
     public string Moving => FormatDuration(GetMoving());
@@ -52,7 +78,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
                 return "—";
 
             double hours = GetMoving().TotalHours;
-            return hours > 0 ? $"{RouteMath.Cumulative(Activity.Points)[^1] / 1000 / hours:F1} km/h" : "—";
+            return hours > 0 ? $"{RouteMath.Cumulative(Activity!.Points)[^1] / 1000 / hours:F1} km/h" : "—";
         }
     }
 
@@ -71,6 +97,20 @@ public sealed class MainViewModel : INotifyPropertyChanged
 
             var pace = TimeSpan.FromMinutes(minutes / km);
             return $"{(int)pace.TotalMinutes}:{pace.Seconds:00} /km";
+        }
+    }
+
+    public string Type
+    {
+        get => Activity?.Type ?? "Cycling";
+        set
+        {
+            if (Activity is null || Activity.Type == value)
+                return;
+
+            Activity.Type = value;
+            Notify();
+            Refresh();
         }
     }
 
@@ -142,7 +182,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
             if (dt <= 0 || dt > 120)
                 continue;
 
-            double speed = RouteMath.Distance(p[i - 1], p[i]) / dt;
+            double speed = p[i].Speed ?? RouteMath.Distance(p[i - 1], p[i]) / dt;
             if (speed >= 0.5)
                 seconds += dt;
         }
@@ -157,6 +197,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
         foreach (var prop in new[]
         {
             nameof(Name),
+            nameof(SwimSummary),
             nameof(Type),
             nameof(Distance),
             nameof(Elapsed),

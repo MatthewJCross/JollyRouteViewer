@@ -14,11 +14,17 @@
         }
 
         #map {
-            height: calc(100% - 125px)
+            height: calc(100% - 150px)
         }
 
         .leaflet-container {
             background: #17222a
+        }
+
+        .marker.selected {
+            background: #ff9d35;
+            border-color: #fff;
+            box-shadow: 0 0 0 3px #ff9d3566
         }
 
         .marker {
@@ -31,7 +37,7 @@
         }
 
         #profile {
-            height: 125px;
+            height: 150px;
             background: #19242f;
             box-sizing: border-box;
             padding: 8px 14px;
@@ -39,6 +45,35 @@
             flex-direction: column;
             gap: 4px
         }
+
+        #profileHeader {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 8px;
+            min-height: 20px
+        }
+
+        #profileControls {
+            display: flex;
+            align-items: center;
+            gap: 5px
+        }
+
+            #profileControls button {
+                background: #304456;
+                color: #e8f1f7;
+                border: 1px solid #52677a;
+                border-radius: 4px;
+                min-width: 27px;
+                height: 23px;
+                cursor: pointer
+            }
+
+                #profileControls button:disabled {
+                    opacity: .35;
+                    cursor: default
+                }
 
         #profileTitle {
             font-weight: 600;
@@ -48,12 +83,36 @@
         #elevation {
             width: 100%;
             height: 90px;
-            display: block
+            display: block;
+            flex: 1;
+            min-height: 0
         }
+
+        #graphScrollRow {
+            display: flex;
+            align-items: center;
+            gap: 9px;
+            height: 20px;
+            flex-shrink: 0;
+            color: #a6b8c6;
+            font-size: 11px
+        }
+
+        #graphScroll {
+            flex: 1;
+            min-width: 0;
+            accent-color: #30bfff;
+            cursor: pointer
+        }
+
+            #graphScroll:disabled {
+                opacity: .35;
+                cursor: default
+            }
     </style>
 </head>
 <body>
-    <div id="map"></div><div id="profile" class="empty"><div id="profileTitle">ELEVATION PROFILE</div><canvas id="elevation"></canvas></div>
+    <div id="map"></div><div id="profile" class="empty"><div id="profileHeader"><div id="profileTitle">ELEVATION PROFILE</div><div id="profileControls"><button id="zoomOut" title="Zoom out graph" aria-label="Zoom out">−</button><button id="zoomIn" title="Zoom into selected section, or graph centre" aria-label="Zoom in">+</button><button id="zoomReset" title="Show full graph">Fit All</button></div></div><canvas id="elevation"></canvas><div id="graphScrollRow"><span>Scroll</span><input id="graphScroll" type="range" min="0" max="1000" step="1" value="0" aria-label="Scroll along graph" disabled><span id="graphScrollPosition">Full route</span></div></div>
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
     <script>
         const map = L.map('map').setView([51.2, -2.9], 11);
@@ -78,17 +137,89 @@
             return { ok: true };
         };
         window.setMapProvider('cartoLight', '');
-        let route = null, selectedRoute = null, handles = [], coords = [], elevations = [], heartRates = [], powers = [], distances = [], selection = [-1, -1], hoverMarker = null, dragStart = null;
+        let route = null, selectedRoute = null, handles = [], coords = [], elevations = [], heartRates = [], powers = [], cadences = [], speeds = [], times = [], distances = [], selection = [-1, -1], hoverMarker = null, dragStart = null;
         const canvas = document.getElementById('elevation');
-        let showHeartRate = false, showPower = false;
+        let showHeartRate = false, showPower = false, showCadence = false, showSpeed = false;
+        let hoverIndex = -1;
+        // Visible distance interval, in metres. Null means the full activity.
+        let graphView = null;
+        function fullDistance() { return Math.max(0, distances[distances.length - 1] || 0); }
+        function visibleDistance() {
+            const total = fullDistance();
+            if (!graphView || total <= 0) return [0, total];
+            const a = Math.max(0, Math.min(total, graphView[0]));
+            const b = Math.max(a, Math.min(total, graphView[1]));
+            return b - a > 0 ? [a, b] : [0, total];
+        }
+        function setGraphView(a, b) {
+            const total = fullDistance();
+            if (total <= 0) return;
+            const width = Math.min(total, Math.max(total / 10000, b - a));
+            const center = (a + b) / 2;
+            const start = Math.max(0, Math.min(total - width, center - width / 2));
+            graphView = (width >= total - 1e-7) ? null : [start, start + width];
+            drawElevation();
+        }
+        function zoomGraph(factor) {
+            const total = fullDistance(); if (total <= 0) return;
+            const [a, b] = visibleDistance();
+            let center = (a + b) / 2;
+            if (factor < 1 && selection[0] >= 0 && selection[1] > selection[0] && selection[1] < distances.length) {
+                const sa = distances[selection[0]], sb = distances[selection[1]];
+                // First zoom focuses on the graph selection; subsequent zooms remain centred there.
+                if (sa >= a && sb <= b) { setGraphView(sa, sb); return; }
+            }
+            const width = Math.min(total, Math.max(total / 10000, (b - a) * factor));
+            setGraphView(center - width / 2, center + width / 2);
+        }
+        // Pan the visible distance window without changing its width or the selected section.
+        const graphScroll = document.getElementById('graphScroll');
+        graphScroll.addEventListener('input', () => {
+            const total = fullDistance();
+            if (!graphView || total <= 0) return;
+            const width = visibleDistance()[1] - visibleDistance()[0];
+            const available = Math.max(0, total - width);
+            const start = available * Number(graphScroll.value) / 1000;
+            graphView = [start, start + width];
+            drawElevation();
+        });
+        function updateGraphScroll() {
+            const total = fullDistance();
+            const [start, end] = visibleDistance();
+            const width = end - start;
+            const available = Math.max(0, total - width);
+            const enabled = !!graphView && available > 0.00001;
+            graphScroll.disabled = !enabled;
+            graphScroll.value = enabled ? String(Math.round(start / available * 1000)) : '0';
+            document.getElementById('graphScrollPosition').textContent = enabled
+                ? `${(start / 1000).toFixed(1)}–${(end / 1000).toFixed(1)} km` : 'Full route';
+        }
+        document.getElementById('zoomIn').addEventListener('click', () => zoomGraph(.5));
+        document.getElementById('zoomOut').addEventListener('click', () => zoomGraph(2));
+        document.getElementById('zoomReset').addEventListener('click', () => { graphView = null; drawElevation(); });
+        // Mouse wheel zooms the graph around the pointer, preserving the selected route section.
+        const profileCanvas = document.getElementById('elevation');
+        profileCanvas.addEventListener('wheel', e => {
+            e.preventDefault();
+            if (!distances.length || fullDistance() <= 0) return;
+            const rect = profileCanvas.getBoundingClientRect();
+            const [start, end] = visibleDistance();
+            const plotLeft = 48, plotRight = rightMargin();
+            const fraction = Math.max(0, Math.min(1, (e.clientX - rect.left - plotLeft) / Math.max(1, rect.width - plotLeft - plotRight)));
+            const anchor = start + fraction * (end - start);
+            const width = Math.max(fullDistance() / 10000, Math.min(fullDistance(), (end - start) * (e.deltaY < 0 ? 0.8 : 1.25)));
+            setGraphView(anchor - fraction * width, anchor + (1 - fraction) * width);
+        }, { passive: false });
         const hasValues = a => a.some(v => typeof v === 'number' && Number.isFinite(v));
-        const rightMargin = () => (showHeartRate && hasValues(heartRates) ? 62 : 0) + (showPower && hasValues(powers) ? 62 : 0) + 8;
+        const rightMargin = () => (showHeartRate && hasValues(heartRates) ? 62 : 0) + (showPower && hasValues(powers) ? 62 : 0) + (showCadence && hasValues(cadences) ? 62 : 0) + (showSpeed && hasValues(speeds) ? 75 : 0) + 8;
+        window.setSpeedVisible = function (visible) { showSpeed = !!visible; drawElevation(); };
+        window.setCadenceVisible = function (visible) { showCadence = !!visible; drawElevation(); };
         window.setPowerVisible = function (visible) { showPower = !!visible; drawElevation(); };
         function updateSelectedRoute() {
             if (selectedRoute) { map.removeLayer(selectedRoute); selectedRoute = null; }
             const [start, end] = selection;
             if (!route || start < 0 || end <= start || end >= coords.length) return;
-            selectedRoute = L.polyline(coords.slice(start, end + 1), {
+            selectedRoute = L.polyline(coords.slice(start, end + 1).filter(Boolean), {
                 color: '#ff9d35', weight: 7, opacity: 1, interactive: false, lineCap: 'round', lineJoin: 'round'
             }).addTo(map);
             selectedRoute.bringToFront();
@@ -98,68 +229,165 @@
         function pointAtEvent(e) {
             const rect = canvas.getBoundingClientRect(), x = Math.max(0, Math.min(rect.width, e.clientX - rect.left));
             if (!distances.length) return 0;
-            const total = distances[distances.length - 1] || 1, target = Math.max(0, Math.min(1, (x - 48) / Math.max(1, rect.width - 48 - rightMargin()))) * total;
+            const [viewStart, viewEnd] = visibleDistance(), target = viewStart + Math.max(0, Math.min(1, (x - 48) / Math.max(1, rect.width - 48 - rightMargin()))) * (viewEnd - viewStart);
             let lo = 0, hi = distances.length - 1;
             while (lo < hi) { const mid = (lo + hi) >> 1; if (distances[mid] < target) lo = mid + 1; else hi = mid; }
             return lo;
+        }
+        const hoverInfo = document.createElement('div');
+        hoverInfo.style.cssText = 'position:fixed;z-index:2000;pointer-events:none;display:none;background:#101b26ee;color:#f2f6fa;border:1px solid #5b7182;border-radius:5px;padding:7px 10px;line-height:1.5;box-shadow:0 3px 12px #0009;white-space:nowrap;font:12px Segoe UI,Arial,sans-serif';
+        document.body.appendChild(hoverInfo);
+        function updateHoverInfo(e, idx) {
+            const value = (arr, unit, decimals = 0) => Number.isFinite(arr[idx]) ? Number(arr[idx]).toFixed(decimals) + ' ' + unit : '—';
+            const when = times[idx] ? new Date(times[idx]) : null;
+            const dateLabel = when && !isNaN(when) ? when.toLocaleString() : '—';
+            hoverInfo.innerHTML = '<b>Point ' + (idx + 1) + '</b> · ' + value(distances, 'm', 0) +
+                '<div>Time: ' + dateLabel + '</div>' +
+                '<div>Elevation: ' + value(elevations, 'm', 1) + '</div>' +
+                '<div>Speed: ' + value(speeds, 'km/h', 1) + '</div>' +
+                '<div>Heart rate: ' + value(heartRates, 'bpm') + '</div>' +
+                '<div>Power: ' + value(powers, 'W') + '</div>' +
+                '<div>Cadence: ' + value(cadences, 'rpm') + '</div>';
+            hoverInfo.style.display = 'block';
+            const left = Math.min(window.innerWidth - hoverInfo.offsetWidth - 8, e.clientX + 14);
+            hoverInfo.style.left = Math.max(4, left) + 'px';
+            hoverInfo.style.top = Math.max(4, e.clientY - hoverInfo.offsetHeight - 10) + 'px';
         }
         canvas.addEventListener('pointerdown', e => { if (!coords.length) return; dragStart = pointAtEvent(e); canvas.setPointerCapture(e.pointerId); });
         canvas.addEventListener('pointermove', e => {
             if (!coords.length) return;
             const idx = pointAtEvent(e);
+            hoverIndex = idx; updateHoverInfo(e, idx); drawElevation();
             if (hoverMarker) map.removeLayer(hoverMarker);
-            hoverMarker = L.circleMarker(coords[idx], { radius: 7, color: '#fff', weight: 2, fillColor: '#50ff78', fillOpacity: 1, interactive: false }).addTo(map);
+            if (coords[idx]) hoverMarker = L.circleMarker(coords[idx], { radius: 7, color: '#fff', weight: 2, fillColor: '#50ff78', fillOpacity: 1, interactive: false }).addTo(map);
             if (dragStart !== null) { selection = [Math.min(dragStart, idx), Math.max(dragStart, idx)]; drawElevation(); updateSelectedRoute(); }
         });
         canvas.addEventListener('pointerup', e => {
             if (dragStart === null) return;
             const idx = pointAtEvent(e); selection = [Math.min(dragStart, idx), Math.max(dragStart, idx)]; dragStart = null; drawElevation();
-            if (selection[1] > selection[0]) window.chrome?.webview?.postMessage({ type: 'selection', start: selection[0], end: selection[1] });
+            if (selection[1] > selection[0]) {
+                window.chrome?.webview?.postMessage({ type: 'selection', start: selection[0], end: selection[1] });
+            } else {
+                // A click without a dragged range clears the graph selection and map overlay.
+                selection = [-1, -1];
+                drawElevation();
+                updateSelectedRoute();
+                window.chrome?.webview?.postMessage({ type: 'selectionClear' });
+            }
         });
-        canvas.addEventListener('pointerleave', () => { if (hoverMarker) { map.removeLayer(hoverMarker); hoverMarker = null; } });
+        canvas.addEventListener('pointerleave', () => { hoverIndex = -1; hoverInfo.style.display = 'none'; drawElevation(); if (hoverMarker) { map.removeLayer(hoverMarker); hoverMarker = null; } });
         window.fitRoute = function () { if (route && route.getLatLngs().length > 1) map.fitBounds(route.getBounds(), { padding: [35, 35] }); };
+        // Map selection: Shift+drag draws a rectangle. Shift+click selects a route-order range.
+        // Ctrl+click adds/removes individual markers (handled by .NET).
+        let selectionAnchor = null;
+        let boxStart = null, boxRectangle = null;
+        let boxAdditive = false;
+        let visibleMarkerIndices = [];
+        const sendMarkerSelection = (indices, additive = false) =>
+            window.chrome?.webview?.postMessage({ type: 'markerSelectionSet', indices, additive });
+        map.on('mousedown', e => {
+            const original = e.originalEvent;
+            if (!original.shiftKey || original.button !== 0 || !visibleMarkerIndices.length) return;
+            // A marker click uses Shift for route-order selection, not rectangle selection.
+            if (original.target.closest?.('.leaflet-marker-icon')) return;
+            boxStart = e.latlng;
+            boxAdditive = !!(original.ctrlKey || original.metaKey);
+            map.dragging.disable();
+            boxRectangle = L.rectangle(L.latLngBounds(boxStart, boxStart), {
+                color: '#ff9d35', weight: 2, fillColor: '#ff9d35', fillOpacity: .16,
+                interactive: false
+            }).addTo(map);
+            original.preventDefault();
+        });
+        map.on('mousemove', e => {
+            if (boxStart && boxRectangle)
+                boxRectangle.setBounds(L.latLngBounds(boxStart, e.latlng));
+        });
+        function finishBoxSelection(e) {
+            if (!boxStart) return;
+            const end = e?.latlng || map.mouseEventToLatLng(e?.originalEvent || e);
+            const bounds = L.latLngBounds(boxStart, end);
+            const startPx = map.latLngToContainerPoint(boxStart);
+            const endPx = map.latLngToContainerPoint(end);
+            const moved = startPx.distanceTo(endPx) > 5;
+            if (boxRectangle) map.removeLayer(boxRectangle);
+            boxRectangle = null; boxStart = null;
+            map.dragging.enable();
+            if (!moved) return;
+            const indices = visibleMarkerIndices.filter(i => coords[i] && bounds.contains(coords[i]));
+            sendMarkerSelection(indices, boxAdditive);
+            if (indices.length) selectionAnchor = indices[indices.length - 1];
+        }
+        map.on('mouseup', finishBoxSelection);
+        // Mouse release outside the map must also end a box selection.
+        window.addEventListener('mouseup', e => {
+            if (boxStart) finishBoxSelection({ latlng: map.mouseEventToLatLng(e) });
+        });
         window.renderRoute = function (data) {
-            coords = data.points.map(p => [p[0], p[1]]); elevations = data.elevations || []; heartRates = data.heartRates || []; powers = data.powers || []; distances = data.cumulative || []; selection = [data.sectionStart ?? -1, data.sectionEnd ?? -1];
+            coords = data.points.map(p => p && p[0] !== null && p[1] !== null ? [p[0], p[1]] : null); elevations = data.elevations || []; heartRates = data.heartRates || []; powers = data.powers || []; cadences = data.cadences || []; speeds = data.speeds || []; times = data.times || []; hoverIndex = -1; distances = data.cumulative || []; selection = [data.sectionStart ?? -1, data.sectionEnd ?? -1];
             if (selectedRoute) { map.removeLayer(selectedRoute); selectedRoute = null; }
             if (route) map.removeLayer(route); handles.forEach(m => map.removeLayer(m)); handles = [];
-            route = L.polyline(coords, { color: '#30bfff', weight: 4, opacity: .95 }).addTo(map);
-            const icon = L.divIcon({ className: '', html: '<div class="marker"></div>', iconSize: [17, 17], iconAnchor: [8, 8] });
+            route = L.polyline(coords.filter(Boolean), { color: '#30bfff', weight: 4, opacity: .95 }).addTo(map);
+            const selectedMarkers = new Set(data.selectedMarkers || []);
+            visibleMarkerIndices = data.markers.slice();
+            const iconFor = idx => L.divIcon({ className: '', html: '<div class="marker' + (selectedMarkers.has(idx) ? ' selected' : '') + '"></div>', iconSize: [17, 17], iconAnchor: [8, 8] });
             data.markers.forEach((idx, i) => {
-                const m = L.marker(coords[idx], { draggable: true, icon, title: 'GPS point ' + (idx + 1) }).addTo(map);
+                if (!coords[idx]) return;
+                const m = L.marker(coords[idx], { draggable: true, icon: iconFor(idx), title: 'GPS point ' + (idx + 1) }).addTo(map);
                 m.bindTooltip(i === 0 ? 'Start' : i === data.markers.length - 1 ? 'Finish' : 'Point ' + (idx + 1));
+                m.on('click', e => {
+                    const ev = e.originalEvent;
+                    if (ev.shiftKey && selectionAnchor !== null) {
+                        const first = Math.min(selectionAnchor, idx), last = Math.max(selectionAnchor, idx);
+                        const indices = [];
+                        // Include every GPS sample in the range, not just visible control markers.
+                        for (let j = first; j <= last; j++) indices.push(j);
+                        sendMarkerSelection(indices, !!(ev.ctrlKey || ev.metaKey));
+                    } else {
+                        window.chrome?.webview?.postMessage({ type: 'markerSelect', index: idx, multi: !!(ev.ctrlKey || ev.metaKey) });
+                        selectionAnchor = idx;
+                    }
+                    L.DomEvent.stopPropagation(ev);
+                });
                 m.on('drag', () => {
                     const ll = m.getLatLng();
                     // Preview the moved control point; .NET applies the full smooth edit on drop.
-                    const preview = coords.map(p => p.slice()); preview[idx] = [ll.lat, ll.lng]; route.setLatLngs(preview);
+                    const preview = coords.map(p => p ? p.slice() : null); preview[idx] = [ll.lat, ll.lng]; route.setLatLngs(preview.filter(Boolean));
                 });
                 m.on('dragend', () => { const ll = m.getLatLng(); window.chrome?.webview?.postMessage({ type: 'move', index: idx, lat: ll.lat, lng: ll.lng }) });
                 handles.push(m);
             });
-            drawElevation(); updateSelectedRoute(); if (data.fit) window.fitRoute();
+            drawElevation(); updateSelectedRoute(); if (data.fit && coords.some(Boolean)) window.fitRoute();
         };
         function drawElevation() {
             const profile = document.getElementById('profile');
             const valid = elevations.filter(v => typeof v === 'number' && Number.isFinite(v));
             const validHr = heartRates.filter(v => typeof v === 'number' && Number.isFinite(v));
             const validPower = powers.filter(v => typeof v === 'number' && Number.isFinite(v));
-            profile.classList.toggle('empty', valid.length < 2 && (!showHeartRate || validHr.length < 2) && (!showPower || validPower.length < 2));
+            const validCadence = cadences.filter(v => typeof v === 'number' && Number.isFinite(v));
+            const validSpeed = speeds.filter(v => typeof v === 'number' && Number.isFinite(v));
+            profile.classList.toggle('empty', valid.length < 2 && (!showHeartRate || validHr.length < 2) && (!showPower || validPower.length < 2) && (!showCadence || validCadence.length < 2) && (!showSpeed || validSpeed.length < 2));
             const ratio = window.devicePixelRatio || 1, rect = canvas.getBoundingClientRect();
             canvas.width = Math.max(1, Math.floor(rect.width * ratio)); canvas.height = Math.max(1, Math.floor(rect.height * ratio));
             const ctx = canvas.getContext('2d'); ctx.scale(ratio, ratio);
             const w = rect.width, h = rect.height, left = 48, right = rightMargin(), top = 16, bottom = 14;
             const plotWidth = Math.max(1, w - left - right), plotHeight = Math.max(1, h - top - bottom);
-            const total = distances.length ? distances[distances.length - 1] : 0;
-            function xFor(i) { return left + (total > 0 && Number.isFinite(distances[i]) ? distances[i] / total : i / Math.max(1, coords.length - 1)) * plotWidth; }
+            const [viewStart, viewEnd] = visibleDistance();
+            function xFor(i) {
+                const d = Number.isFinite(distances[i]) ? distances[i] : 0;
+                return left + (d - viewStart) / Math.max(1, viewEnd - viewStart) * plotWidth;
+            }
+
             function drawTrace(values, minimum, maximum, color) {
-                const range = Math.max(1, maximum - minimum); ctx.beginPath(); let started = false;
+                const range = Math.max(1, maximum - minimum); ctx.save(); ctx.beginPath(); ctx.rect(left, top, plotWidth, plotHeight); ctx.clip(); ctx.beginPath(); let started = false;
                 values.forEach((v, i) => {
                     if (typeof v !== 'number' || !Number.isFinite(v)) { started = false; return; }
                     const x = xFor(i), y = top + plotHeight - (v - minimum) / range * plotHeight;
                     if (!started) { ctx.moveTo(x, y); started = true; } else ctx.lineTo(x, y);
-                }); ctx.strokeStyle = color; ctx.lineWidth = 2; ctx.stroke();
+                }); ctx.strokeStyle = color; ctx.lineWidth = 2; ctx.stroke(); ctx.restore();
             }
             if (selection[0] >= 0 && selection[1] > selection[0] && selection[1] < coords.length) {
-                ctx.fillStyle = 'rgba(80,255,120,.14)'; ctx.fillRect(xFor(selection[0]), top, xFor(selection[1]) - xFor(selection[0]), plotHeight);
+                ctx.fillStyle = 'rgba(80,255,120,.14)'; const sx = Math.max(left, xFor(selection[0])), ex = Math.min(w - right, xFor(selection[1])); if (ex > sx) ctx.fillRect(sx, top, ex - sx, plotHeight);
             }
             ctx.font = '11px Segoe UI';
             if (valid.length) {
@@ -181,7 +409,35 @@
                 ctx.fillText(Math.round(max) + ' W', axisX, top + 7);
                 ctx.fillText(Math.round(min) + ' W', axisX, h - bottom);
             }
-            ctx.fillStyle = '#a6b8c6'; ctx.fillText('Drag to select · Hover to locate', Math.max(left, w - 235), 11);
+            if (showCadence && validCadence.length) {
+                const min = Math.min(...validCadence), max = Math.max(...validCadence);
+                drawTrace(cadences, min, max, '#59caff'); ctx.fillStyle = '#59caff';
+                const axisX = w - right + 3 + (showHeartRate && validHr.length ? 62 : 0) + (showPower && validPower.length ? 62 : 0);
+                ctx.fillText(Math.round(max) + ' rpm', axisX, top + 7);
+                ctx.fillText(Math.round(min) + ' rpm', axisX, h - bottom);
+            }
+            if (showSpeed && validSpeed.length) {
+                const min = Math.min(...validSpeed), max = Math.max(...validSpeed);
+                drawTrace(speeds, min, max, '#ff9966'); ctx.fillStyle = '#ff9966';
+                const axisX = w - right + 3 + (showHeartRate && validHr.length ? 62 : 0) + (showPower && validPower.length ? 62 : 0) + (showCadence && validCadence.length ? 62 : 0);
+                ctx.fillText(max.toFixed(1) + ' km/h', axisX, top + 7);
+                ctx.fillText(min.toFixed(1) + ' km/h', axisX, h - bottom);
+            }
+            if (hoverIndex >= 0 && hoverIndex < distances.length) {
+                const hx = xFor(hoverIndex);
+                if (hx >= left && hx <= w - right) {
+                    ctx.save(); ctx.strokeStyle = '#e8f3ff'; ctx.setLineDash([3, 3]); ctx.lineWidth = 1;
+                    ctx.beginPath(); ctx.moveTo(hx, top); ctx.lineTo(hx, h - bottom); ctx.stroke(); ctx.restore();
+                }
+            }
+            ctx.fillStyle = '#a6b8c6';
+            const km = v => (v / 1000).toFixed((viewEnd - viewStart) < 10000 ? 2 : 1) + ' km';
+            ctx.fillText(km(viewStart), left, h - 2);
+            ctx.fillText(km(viewEnd), Math.max(left, w - right - 55), h - 2);
+            ctx.fillText('Drag to select · Hover for values', Math.max(left, w - 235), 11);
+            document.getElementById('zoomOut').disabled = !graphView;
+            document.getElementById('zoomReset').disabled = !graphView;
+            updateGraphScroll();
         }
         window.addEventListener('resize', drawElevation);
     </script>

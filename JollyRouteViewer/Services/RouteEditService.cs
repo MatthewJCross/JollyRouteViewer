@@ -7,11 +7,12 @@ public static class RouteEditService
     // Endpoints remain fixed, except when the dragged marker itself is an endpoint.
     public static void MoveMarker(IList<RoutePoint> points, IReadOnlyList<int> controls, int index, double latitude, double longitude)
     {
-        if (index < 0 || index >= points.Count || !controls.Contains(index)) 
+        if (index < 0 || index >= points.Count || !controls.Contains(index))
             return;
 
-        double deltaLat = latitude - points[index].Latitude;
-        double deltaLon = longitude - points[index].Longitude;
+        if (points[index].Latitude is not double currentLat || points[index].Longitude is not double currentLon) return;
+        double deltaLat = latitude - currentLat;
+        double deltaLon = longitude - currentLon;
         int controlPosition = controls.IndexOfValue(index);
         int left = controlPosition > 0 ? controls[controlPosition - 1] : index;
         int right = controlPosition + 1 < controls.Count ? controls[controlPosition + 1] : index;
@@ -30,15 +31,18 @@ public static class RouteEditService
                 weight = t * t * (3 - 2 * t);
             }
             else weight = 0;
-            points[i].Latitude = Math.Clamp(points[i].Latitude + deltaLat * weight, -90, 90);
-            points[i].Longitude = NormalizeLongitude(points[i].Longitude + deltaLon * weight);
+            if (points[i].Latitude is double lat && points[i].Longitude is double lon)
+            {
+                points[i].Latitude = Math.Clamp(lat + deltaLat * weight, -90, 90);
+                points[i].Longitude = NormalizeLongitude(lon + deltaLon * weight);
+            }
         }
     }
     private static double NormalizeLongitude(double lon) => ((lon + 180) % 360 + 360) % 360 - 180;
     private static int IndexOfValue(this IReadOnlyList<int> values, int value)
     {
-        for (int i = 0; i < values.Count; i++) 
-            if (values[i] == value) 
+        for (int i = 0; i < values.Count; i++)
+            if (values[i] == value)
                 return i;
 
         return -1;

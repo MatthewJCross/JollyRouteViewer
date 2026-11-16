@@ -5,7 +5,14 @@
     <UseWPF>true</UseWPF>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
+    <ApplicationIcon>Resources\JollyRouteViewer.ico</ApplicationIcon>
   </PropertyGroup>
+  <ItemGroup>
+    <None Remove="Resources\JollyRouteViewer.png" />
+  </ItemGroup>
   <ItemGroup><PackageReference Include="Microsoft.Web.WebView2" Version="1.0.3595.46" /></ItemGroup>
-  <ItemGroup><Content Include="Map\map.html" CopyToOutputDirectory="PreserveNewest" /></ItemGroup>
+  <ItemGroup><Content Include="Map\map.html" CopyToOutputDirectory="PreserveNewest" /><Content Include="Resources\JollyRouteViewer.ico" /></ItemGroup>
+  <ItemGroup>
+    <Resource Include="Resources\JollyRouteViewer.png" />
+  </ItemGroup>
 </Project>

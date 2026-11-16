@@ -1,15 +1,23 @@
 using JollyRouteViewer.Models;
 namespace JollyRouteViewer.Services;
+
 public static class RouteReverseService
 {
     public static void Reverse(RouteActivity activity)
     {
         var pts = activity.Points;
-        if (pts.Count < 2) 
+        if (pts.Count < 2)
             return;
 
         var oldTimes = pts.Select(p => p.Time).ToArray();
+        double[] originalSegments = new double[pts.Count];
+        for (int i = 1; i < pts.Count; i++) originalSegments[i] = RouteMath.Distance(pts[i - 1], pts[i]);
         pts.Reverse();
+        if (pts.Any(p => !p.Latitude.HasValue))
+        {
+            double total = 0; pts[0].Distance = 0;
+            for (int i = 1; i < pts.Count; i++) { total += originalSegments[pts.Count - i]; pts[i].Distance = total; }
+        }
         // Retain original start/end and reverse the sequence of time intervals.
         // Reversing recorded samples also reverses HR/cadence/power/elevation.
         if (oldTimes.All(t => t.HasValue))
@@ -28,11 +36,12 @@ public static class RouteReverseService
     public static void RecalculateSpeeds(IList<RoutePoint> pts)
     {
         if (pts.Count == 0) return;
+        if (pts[0].Latitude is null) return;
         pts[0].Speed = null;
         for (int i = 1; i < pts.Count; i++)
         {
-            double dt = pts[i].Time is DateTimeOffset a && pts[i-1].Time is DateTimeOffset b ? (a-b).TotalSeconds : 0;
-            pts[i].Speed = dt > 0 ? RouteMath.Distance(pts[i-1], pts[i]) / dt : null;
+            double dt = pts[i].Time is DateTimeOffset a && pts[i - 1].Time is DateTimeOffset b ? (a - b).TotalSeconds : 0;
+            pts[i].Speed = dt > 0 ? RouteMath.Distance(pts[i - 1], pts[i]) / dt : null;
         }
     }
 }

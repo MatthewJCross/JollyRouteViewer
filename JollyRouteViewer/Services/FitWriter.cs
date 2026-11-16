@@ -24,13 +24,23 @@ public static class FitWriter
     private static int Semi(double degrees) => (int)Math.Clamp(Math.Round(degrees * 2147483648d / 180d), int.MinValue + 1d, int.MaxValue);
 
     private static byte Sport(string type) => type.ToLowerInvariant() switch
-    { "running" or "run" => 1, "cycling" or "biking" or "bike" => 2, "swimming" => 5, "walking" or "hiking" => 11, _ => 0 };
+    { "running" or "run" or "treadmill running" or "virtual running" => 1, "cycling" or "biking" or "bike" or "indoor cycling" or "virtual cycling" => 2, "swimming" or "pool swimming" or "open water swimming" => 5, "walking" or "hiking" => 11, "rowing" or "indoor rowing" => 15, _ => 0 };
 
+    private static byte SubSport(string type) => type.ToLowerInvariant() switch
+    {
+        "pool swimming" => 0,
+        "open water swimming" => 17,
+        "indoor cycling" => 6,
+        "treadmill running" => 1,
+        "indoor rowing" => 14,
+        "virtual cycling" or "virtual running" => 58,
+        _ => 0
+    };
     public static void Save(RouteActivity activity, string path)
     {
         var pts = activity.Points;
         if (pts.Count < 2 || pts.Any(p => p.Time is null))
-            throw new InvalidOperationException("FIT export requires at least two GPS points and a timestamp on every point.");
+            throw new InvalidOperationException("FIT export requires at least two activity records and a timestamp on every point.");
 
         for (int i = 1; i < pts.Count; i++)
             if (pts[i].Time < pts[i - 1].Time)
@@ -41,6 +51,8 @@ public static class FitWriter
         double elapsed = Math.Max(0, (last - first).TotalSeconds);
         var cumulative = RouteMath.Cumulative(pts);
         double distance = cumulative[^1];
+        if (activity.Type == "Pool Swimming" && activity.PoolLengthMetres is double poolMetres && activity.SwimLengths.Count > 0)
+            distance = activity.SwimLengths.Count(x => !x.IsRest) * poolMetres;
         double moving = 0, gain = 0, loss = 0;
         double? lastElevation = null;
         foreach (var p in pts)
@@ -60,7 +72,7 @@ public static class FitWriter
         for (int i = 1; i < pts.Count; i++)
         {
             double dt = (pts[i].Time!.Value - pts[i - 1].Time!.Value).TotalSeconds;
-            if (dt > 0 && dt <= 120 && RouteMath.Distance(pts[i - 1], pts[i]) / dt >= 0.5)
+            if (dt > 0 && dt <= 120 && (pts[i].Speed ?? RouteMath.Distance(pts[i - 1], pts[i]) / dt) >= 0.5)
                 moving += dt;
         }
 
@@ -70,20 +82,30 @@ public static class FitWriter
         int avgCad = Average(pts.Select(p => p.Cadence));
         int avgPower = Average(pts.Select(p => p.Power));
         byte sport = Sport(activity.Type);
+        byte subSport = SubSport(activity.Type);
         using var data = new MemoryStream();
         void Message(byte local, ushort global, params Field[] fields) { data.WriteByte((byte)(0x40 | local)); data.WriteByte(0); data.WriteByte(0); Write16(data, global); data.WriteByte((byte)fields.Length); foreach (var f in fields) { data.WriteByte(f.Number); data.WriteByte(f.Size); data.WriteByte(f.Type); } data.WriteByte(local); foreach (var f in fields) { for (int b = 0; b < f.Size; b++) data.WriteByte((byte)(f.Value >> (8 * b))); } }
 
         Message(0, 0, U8(0, 4), U16(1, 255), U16(2, 1), U32(3, 1), U32(4, Timestamp(first)));
+        // Identify the export software without impersonating a physical Garmin device.
+        Message(6, 49, U16(0, 100), U8(1, 1)); // file_creator
+        Message(7, 23, U32(253, Timestamp(first)), U8(0, 0), U16(2, 255), U16(4, 1)); // device_info
+        // Timer events frame the activity timeline.
+        Message(5, 21, U32(253, Timestamp(first)), U8(0, 0), U8(1, 0));
         for (int i = 0; i < pts.Count; i++)
         {
             var p = pts[i];
             var fields = new List<Field>
             {
                 U32(253, Timestamp(p.Time!.Value)),
-                S32(0, Semi(p.Latitude)),
-                S32(1, Semi(p.Longitude)),
                 U32(5, cumulative[i] * 100)
             };
+
+            if (p.Latitude is double lat && p.Longitude is double lon)
+            {
+                fields.Add(S32(0, Semi(lat)));
+                fields.Add(S32(1, Semi(lon)));
+            }
 
             if (p.Elevation is double e)
                 fields.Add(U16(2, (e + 500) * 5));
@@ -103,22 +125,40 @@ public static class FitWriter
             Message(1, 20, fields.ToArray());
         }
 
+        // Pool lengths are first-class FIT messages. Preserve the stroke counts and rest flags.
+        // Only emit lengths if their original timestamps still fit the exported activity timeline.
+        if (activity.Type == "Pool Swimming" && activity.SwimLengths.Count > 0)
+        {
+            foreach (var length in activity.SwimLengths)
+            {
+                if (length.StartTime is not DateTimeOffset ls || length.EndTime is not DateTimeOffset le)
+                    continue;
+                if (ls < first || le > last || le < ls) continue;
+                var lengthFields = new List<Field> { U32(253, Timestamp(le)), U32(2, Timestamp(ls)),
+                    U32(3, length.ElapsedSeconds * 1000), U32(4, length.TimerSeconds * 1000),
+                    U8(12, length.IsRest ? 0 : 1) };
+                if (length.Strokes is int strokes) lengthFields.Add(U16(5, strokes));
+                if (length.StrokeType is int stroke) lengthFields.Add(U8(7, stroke));
+                Message(8, 101, lengthFields.ToArray());
+            }
+        }
+        Message(5, 21, U32(253, Timestamp(last)), U8(0, 0), U8(1, 1));
         var lap = new List<Field>
         {
             U32(253, Timestamp(last)),
             U32(2, Timestamp(first)),
-            S32(3, Semi(pts[0].Latitude)),
-            S32(4, Semi(pts[0].Longitude)),
-            S32(5, Semi(pts[^1].Latitude)),
-            S32(6, Semi(pts[^1].Longitude)),
             U32(7, elapsed * 1000),
             U32(8, moving * 1000),
             U32(9, distance * 100),
             U16(13, avgSpeed * 1000),
             U16(14, maxSpeed * 1000),
-            U8(25, sport)
+            U8(25, sport), U8(26, subSport)
         };
 
+        if (pts[0].Latitude is double startLat && pts[0].Longitude is double startLon)
+        { lap.Add(S32(3, Semi(startLat))); lap.Add(S32(4, Semi(startLon))); }
+        if (pts[^1].Latitude is double endLat && pts[^1].Longitude is double endLon)
+        { lap.Add(S32(5, Semi(endLat))); lap.Add(S32(6, Semi(endLon))); }
         AddOptional(lap, 15, avgHr);
         AddOptional(lap, 17, avgCad);
         AddOptional16(lap, 19, avgPower);
@@ -133,13 +173,20 @@ public static class FitWriter
             U16(14, avgSpeed * 1000),
             U16(15, maxSpeed * 1000),
             U8(5, sport),
-            U8(6, 0),
+            U8(6, subSport),
             U16(26, 1),
             U16(25, 0),
             U16(22, gain),
             U16(23, loss)
         };
 
+        if (activity.Type == "Pool Swimming")
+        {
+            if (activity.PoolLengthMetres is double pool && pool > 0)
+                session.Add(U16(44, pool * 100));
+            if (activity.SwimLengths.Count > 0)
+                session.Add(U16(33, activity.SwimLengths.Count(x => !x.IsRest)));
+        }
         AddOptional(session, 16, avgHr);
         AddOptional(session, 18, avgCad);
         AddOptional16(session, 20, avgPower);

@@ -135,8 +135,8 @@ public static class FitPreservingWriter
                     throw new InvalidOperationException("FIT record count changed.");
 
                 var p = pts[record];
-                Patch(def, bytes, start, 0, Semi(p.Latitude));
-                Patch(def, bytes, start, 1, Semi(p.Longitude));
+                Patch(def, bytes, start, 0, Semi(p.Latitude!.Value));
+                Patch(def, bytes, start, 1, Semi(p.Longitude!.Value));
                 Patch(def, bytes, start, 5, cumulative[record] * 100);
                 if (p.Elevation.HasValue)
                 {
@@ -165,7 +165,8 @@ public static class FitPreservingWriter
                     if (!previousWrittenTimestamp.HasValue || ((previousWrittenTimestamp.Value & ~31u) | (newTime & 31u)) + (newTime % 32 < previousWrittenTimestamp.Value % 32 ? 32u : 0u) != newTime)
                         throw new InvalidOperationException("Edited timestamps cannot be encoded in this FIT file's compressed timestamp layout. Use regenerated FIT export instead.");
 
-                    bytes[start - 1] = (byte)((h & 0xE0) | (newTime & 31));
+                    byte timeBits = (byte)(newTime & 0x1F);
+                    bytes[start - 1] = (byte)((h & 0xE0) | timeBits);
                 }
                 else if (timestampField is null)
                     throw new InvalidOperationException("A GPS record lacks an editable timestamp field. Use regenerated FIT export instead.");
@@ -190,10 +191,10 @@ public static class FitPreservingWriter
                 }
                 else
                 {
-                    Patch(def, bytes, start, 3, Semi(pts[0].Latitude));
-                    Patch(def, bytes, start, 4, Semi(pts[0].Longitude));
-                    Patch(def, bytes, start, 5, Semi(pts[^1].Latitude));
-                    Patch(def, bytes, start, 6, Semi(pts[^1].Longitude));
+                    Patch(def, bytes, start, 3, Semi(pts[0].Latitude!.Value));
+                    Patch(def, bytes, start, 4, Semi(pts[0].Longitude!.Value));
+                    Patch(def, bytes, start, 5, Semi(pts[^1].Latitude!.Value));
+                    Patch(def, bytes, start, 6, Semi(pts[^1].Longitude!.Value));
                 }
             }
             else if (def.Global == 34)
@@ -258,19 +259,19 @@ public static class FitPreservingWriter
                     Write32((uint)Math.Clamp(Math.Round(value), 0, uint.MaxValue - 1d)); break;
         }
 
-        void Write16(ushort v) 
-        { 
-            if (def.Big) 
-                BinaryPrimitives.WriteUInt16BigEndian(data.AsSpan(offset, 2), v); 
-            else 
-                BinaryPrimitives.WriteUInt16LittleEndian(data.AsSpan(offset, 2), v); 
+        void Write16(ushort v)
+        {
+            if (def.Big)
+                BinaryPrimitives.WriteUInt16BigEndian(data.AsSpan(offset, 2), v);
+            else
+                BinaryPrimitives.WriteUInt16LittleEndian(data.AsSpan(offset, 2), v);
         }
 
-        void Write32(uint v) 
-        { 
-            if (def.Big) 
-                BinaryPrimitives.WriteUInt32BigEndian(data.AsSpan(offset, 4), v); 
-            else 
+        void Write32(uint v)
+        {
+            if (def.Big)
+                BinaryPrimitives.WriteUInt32BigEndian(data.AsSpan(offset, 4), v);
+            else
                 BinaryPrimitives.WriteUInt32LittleEndian(data.AsSpan(offset, 4), v);
         }
     }
